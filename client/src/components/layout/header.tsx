@@ -14,7 +14,7 @@ export default function Header () {
       <div className='container mx-auto px-4 py-4 flex justify-between items-center'>
         <Link href='/' className='flex items-center'>
           <Music className='h-6 w-6 mr-2' />
-          <h1 className='text-2xl font-semibold'>SoundShift</h1>
+          <h1 className='text-2xl font-semibold'>MusicShift</h1>
         </Link>
 
         {!isMobile ? (

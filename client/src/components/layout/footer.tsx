@@ -9,7 +9,7 @@ export default function Footer() {
           <div>
             <div className="flex items-center mb-4">
               <Music className="h-6 w-6 mr-2" />
-              <h2 className="text-xl font-semibold">SoundShift</h2>
+              <h2 className="text-xl font-semibold">MusicShift</h2>
             </div>
             <p className="text-gray-400 text-sm">
               Transform your music into any genre using our advanced AI

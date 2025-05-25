@@ -2,9 +2,17 @@ import os                   # for file path operations
 import librosa              # for audio processing (loading, pitch shifting, time stretching, etc.)
 import soundfile as sf      # for saving audio files
 import numpy as np          # for number crunching (arrays, math)
-from scipy.signal import butter, lfilter  # for digital filters like lowpass/highpass
+from scipy.signal import butter, lfilter, spectrogram  # for digital filters and spectrogram
 import subprocess           # for running terminal commands like FFmpeg
 import logging              # for logging messages
+import torch               # for PyTorch model
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as transforms  # for image transformations
+from PIL import Image      # for image processing
+import matplotlib
+matplotlib.use('Agg')  # Set backend to Agg for thread safety
+import matplotlib.pyplot as plt  # for generating spectrograms
 # import tensorflow as tf
 # from tensorflow.keras.models import load_model
 # import librosa.feature
@@ -17,9 +25,38 @@ logger = logging.getLogger(__name__)
 # Constants for audio processing
 SR = 22050  # Standard sample rate (CD quality is 44100Hz, but 22050Hz is common for processing)
 TRANSFORMATIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'transformations')
+MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'model', 'music_genre_cnn_weights.pth')
 
 # Ensure transformations directory exists
 os.makedirs(TRANSFORMATIONS_DIR, exist_ok=True)
+
+# Image transform for model input
+transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.ToTensor(),
+])
+
+# Genre mapping
+GENRES = ['rock', 'disco', 'hiphop', 'classical', 'country']
+label_to_genre = {i: genre for i, genre in enumerate(GENRES)}
+
+# Define the SimpleCNN model class
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes=5):
+        super(SimpleCNN, self).__init__()
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(32 * 32 * 32, 128)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))  # [B, 16, 128, 128]
+        x = F.max_pool2d(x, 2)     # [B, 16, 64, 64]
+        x = F.relu(self.conv2(x))  # [B, 32, 64, 64]
+        x = F.max_pool2d(x, 2)     # [B, 32, 32, 32]
+        x = x.view(x.size(0), -1)  # Flatten
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
 
 class AudioProcessor:
     """
@@ -134,55 +171,122 @@ class AudioProcessor:
         return processed
 
     @staticmethod
+    def load_model():
+        """Load the trained genre classification model"""
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # Create model instance
+            model = SimpleCNN(num_classes=5).to(device)
+            # Load state dict
+            state_dict = torch.load(MODEL_PATH, map_location=device)
+            # Load the state dict into the model
+            model.load_state_dict(state_dict)
+            model.eval()
+            logger.info("Successfully loaded genre prediction model")
+            return model, device
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            return None, None
+
+    @staticmethod
+    def predict_genre(image_path, model, device):
+        """Predict genre from spectrogram image"""
+        try:
+            image = Image.open(image_path).convert("RGB")
+            image = transform(image).unsqueeze(0).to(device)
+            with torch.no_grad():
+                output = model(image)
+                predicted = torch.argmax(output, 1).item()
+                return label_to_genre[predicted]
+        except Exception as e:
+            logger.error(f"Error predicting genre: {e}")
+            return None
+
+    @staticmethod
+    def generate_spectrogram(audio_path, output_path):
+        """Generate spectrogram from audio file using only scipy"""
+        try:
+            # Load audio file using soundfile instead of librosa
+            y, sr = sf.read(audio_path)
+            if len(y.shape) > 1:  # Convert stereo to mono if needed
+                y = np.mean(y, axis=1)
+            
+            # Generate spectrogram using scipy
+            frequencies, times, Sxx = spectrogram(y, fs=sr, nperseg=1024, noverlap=512)
+            
+            # Convert to log scale and normalize
+            Sxx_db = 10 * np.log10(Sxx + 1e-10)
+            Sxx_db = (Sxx_db - Sxx_db.min()) / (Sxx_db.max() - Sxx_db.min())
+            
+            # Convert to image
+            plt.figure(figsize=(10, 4))
+            plt.imshow(Sxx_db, aspect='auto', origin='lower', cmap='viridis')
+            plt.axis('off')  # Hide axes
+            plt.tight_layout()
+            
+            # Save as PNG
+            plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
+            plt.close()
+            
+            return output_path
+        except Exception as e:
+            logger.error(f"Error generating spectrogram: {e}")
+            return None
+
+    @staticmethod
     def transform_genre(input_file, output_file, target_genre):
         """
         Transform an audio file to match a target genre using FFmpeg.
-        FFmpeg filters used:
-        - compand: dynamic range compression
-        - highpass/lowpass: frequency filtering
-        - equalizer: frequency band adjustment
-        - aecho: echo/reverb effect
-        - volume: gain adjustment
+        Returns a tuple of (success, predicted_genre, target_genre)
         """
         logger.info(f"Transforming {input_file} to {target_genre} genre...")
+        
+        predicted_genre = None
+        # Load model and predict genre
+        model, device = AudioProcessor.load_model()
+        if model is not None:
+            # Generate spectrogram
+            spectrogram_path = os.path.splitext(input_file)[0] + '.png'
+            if AudioProcessor.generate_spectrogram(input_file, spectrogram_path):
+                try:
+                    predicted_genre = AudioProcessor.predict_genre(spectrogram_path, model, device)
+                    if predicted_genre:
+                        logger.info(f"Predicted genre of input file: {predicted_genre}")
+                    else:
+                        logger.error("Genre prediction failed - model returned None")
+                except Exception as e:
+                    logger.error(f"Error during genre prediction: {str(e)}")
+                finally:
+                    # Clean up spectrogram file
+                    try:
+                        os.remove(spectrogram_path)
+                    except:
+                        pass
         
         # Choose transformation based on genre
         if target_genre == "rock":
             # ROCK: Heavy distortion, compression, boosted mids and highs
-            # compand: dynamic range compression with specific attack/decay
-            # highpass: remove frequencies below 60Hz
-            # equalizer: boost specific frequency bands
-            # volume: increase overall volume
             ffmpeg_cmd = f'ffmpeg -y -i "{input_file}" -af "compand=attacks=0:decays=0.1:points=-90/-60|-40/-10|0/-3:soft-knee=6,highpass=f=60,equalizer=f=800:width_type=o:width=2:g=8,equalizer=f=1400:width_type=o:width=2:g=12,equalizer=f=4000:width_type=o:width=2:g=9,volume=3" "{output_file}"'
             
         elif target_genre == "electronic":
             # ELECTRONIC: Echo, filter sweeps, punchy beats
-            # aecho: multiple echo delays with different decay rates
-            # highpass: remove low frequencies
-            # equalizer: boost high frequencies
             ffmpeg_cmd = f'ffmpeg -y -i "{input_file}" -af "aecho=0.9:0.9:60|90:0.7|0.5,highpass=f=60,equalizer=f=5000:width_type=o:width=2:g=5,volume=1.8" "{output_file}"'
             
         elif target_genre == "hiphop":
             # HIP-HOP: Heavy bass, slower tempo, emphasis on beats
-            # equalizer: boost low frequencies for bass
             ffmpeg_cmd = f'ffmpeg -y -i "{input_file}" -af "equalizer=f=60:width_type=o:width=2:g=12,equalizer=f=100:width_type=o:width=2:g=10,volume=1.6" "{output_file}"'
             
         elif target_genre == "classical":
             # CLASSICAL: Reverb, dynamic range, orchestral effect
-            # aecho: long reverb for hall effect
-            # highpass: remove very low frequencies
-            # equalizer: subtle mid-range boost
             ffmpeg_cmd = f'ffmpeg -y -i "{input_file}" -af "aecho=0.9:0.9:1000|1800:0.6|0.4,highpass=f=30,equalizer=f=700:width_type=o:width=2:g=3,volume=1.4" "{output_file}"'
             
         elif target_genre == "country":
             # COUNTRY: Twangy, vocal clarity, slight reverb
-            # equalizer: boost mid-high frequencies for twang
-            # aecho: short reverb for space
             ffmpeg_cmd = f'ffmpeg -y -i "{input_file}" -af "equalizer=f=2000:width_type=o:width=2:g=6,equalizer=f=4000:width_type=o:width=2:g=4,equalizer=f=6000:width_type=o:width=2:g=5,aecho=0.6:0.6:20|40:0.3|0.2,volume=1.5" "{output_file}"'
             
         else:
             logger.error(f"Genre '{target_genre}' not recognized.")
-            return False
+            return False, predicted_genre, target_genre
         
         try:
             # Execute FFmpeg command
@@ -192,97 +296,15 @@ class AudioProcessor:
             # Verify the output file exists
             if not os.path.exists(output_file):
                 logger.error(f"Output file not created: {output_file}")
-                return False
+                return False, predicted_genre, target_genre
                 
             logger.info(f"Successfully transformed to {target_genre} genre: {output_file}")
-            return True
+            return True, predicted_genre, target_genre
             
         except subprocess.CalledProcessError as e:
             logger.error(f"FFmpeg error: {str(e)}")
-            return False
+            return False, predicted_genre, target_genre
         except Exception as e:
             logger.error(f"Error during transformation: {str(e)}")
-            return False
+            return False, predicted_genre, target_genre
     
-    # @staticmethod
-    # def extract_features(audio_path, n_mels=128, n_fft=2048, hop_length=512):
-    #     """
-    #     Extract mel spectrogram features from audio file.
-        
-    #     Args:
-    #         audio_path: Path to audio file
-    #         n_mels: Number of mel bands
-    #         n_fft: FFT window size
-    #         hop_length: Number of samples between successive frames
-            
-    #     Returns:
-    #         mel_spec: Mel spectrogram features
-    #     """
-    #     try:
-    #         # Load audio file
-    #         y, sr = librosa.load(audio_path, sr=22050)
-            
-    #         # Extract mel spectrogram
-    #         mel_spec = librosa.feature.melspectrogram(
-    #             y=y, 
-    #             sr=sr,
-    #             n_mels=n_mels,
-    #             n_fft=n_fft,
-    #             hop_length=hop_length
-    #         )
-            
-    #         # Convert to log scale (dB)
-    #         mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-            
-    #         # Normalize
-    #         mel_spec_norm = (mel_spec_db - mel_spec_db.min()) / (mel_spec_db.max() - mel_spec_db.min())
-            
-    #         # Reshape for model input (add channel dimension)
-    #         mel_spec_norm = np.expand_dims(mel_spec_norm, axis=-1)
-            
-    #         return mel_spec_norm
-            
-    #     except Exception as e:
-    #         logger.error(f"Error extracting features: {e}")
-    #         raise
-
-    # @staticmethod
-    # def detect_genre(audio_file):
-        """
-        Detect the genre of an audio file using a pre-trained CNN model.
-        
-        Args:
-            audio_file: Path to the audio file
-            
-        Returns:
-            str: Predicted genre
-        """
-        try:
-            # Define supported genres (matching our transformation genres)
-            GENRES = ['rock', 'electronic', 'hiphop', 'classical', 'country']
-            
-            # Load the pre-trained model
-            model_path = os.path.join(os.path.dirname(__file__), 'models', 'genre_model.h5')
-            if not os.path.exists(model_path):
-                logger.error("Genre detection model not found. Please train the model first.")
-                return "unknown"
-                
-            model = load_model(model_path)
-            
-            # Extract features
-            features = AudioProcessor.extract_features(audio_file)
-            
-            # Make prediction
-            predictions = model.predict(np.expand_dims(features, axis=0))
-            predicted_genre_idx = np.argmax(predictions[0])
-            predicted_genre = GENRES[predicted_genre_idx]
-            
-            # Get confidence score
-            confidence = predictions[0][predicted_genre_idx]
-            
-            logger.info(f"Detected genre: {predicted_genre} (confidence: {confidence:.2f})")
-            return predicted_genre
-            
-        except Exception as e:
-            logger.error(f"Error in genre detection: {e}")
-            return "unknown"

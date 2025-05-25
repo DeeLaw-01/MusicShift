@@ -35,7 +35,6 @@ app.use((req, res, next) => {
 
   next()
 })
-
 ;(async () => {
   const server = await registerRoutes(app)
 
@@ -67,6 +66,7 @@ app.use((req, res, next) => {
       reusePort: true
     },
     () => {
+      console.log(server.constructor.name)
       log(`serving on port ${port}`)
     }
   )

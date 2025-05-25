@@ -4,7 +4,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import WorkflowSteps from '@/components/workflow-steps'
 import { useToast } from '@/hooks/use-toast'
-import { FileAudio } from 'lucide-react'
+import { FileAudio, ArrowRight } from 'lucide-react'
+import axios, { AxiosError } from 'axios'
 
 const GENRES = [
   { id: 'rock', name: 'Rock' },
@@ -20,6 +21,7 @@ export default function Transform () {
   const [filename, setFilename] = useState<string>('')
   const [selectedGenre, setSelectedGenre] = useState<string>('')
   const [converting, setConverting] = useState(false)
+  const [predictedGenre, setPredictedGenre] = useState<string | null>(null)
 
   useEffect(() => {
     // Get filename from URL query parameter
@@ -45,50 +47,75 @@ export default function Transform () {
     try {
       setConverting(true)
 
-      const response = await fetch('http://127.0.0.1:8080/api/convert', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
+      const response = await axios.post(
+        'http://127.0.0.1:8080/api/convert',
+        {
           filename,
           targetGenre: selectedGenre
-        })
-      })
+        },
+        {
+          responseType: 'blob',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to convert file')
+      console.log('Response:', response)
+      console.log('Response headers:', response.headers)
+
+      // Get metadata from response headers
+      const encodedMetadata =
+        response.headers['x-conversion-metadata'] ||
+        response.headers['X-Conversion-Metadata']
+      console.log('Encoded metadata from headers:', encodedMetadata)
+
+      let metadata: { predictedGenre?: string } = {}
+
+      if (encodedMetadata) {
+        try {
+          const decodedMetadata = atob(encodedMetadata)
+          console.log('Decoded metadata:', decodedMetadata)
+          metadata = JSON.parse(decodedMetadata)
+          console.log('Parsed metadata:', metadata)
+
+          if (metadata.predictedGenre) {
+            console.log('Setting predicted genre:', metadata.predictedGenre)
+            setPredictedGenre(metadata.predictedGenre)
+          }
+        } catch (error) {
+          console.error('Error parsing metadata:', error)
+        }
+      } else {
+        console.log('No metadata found in response headers')
+        // Log all available headers for debugging
+        console.log('All available headers:', Object.keys(response.headers))
       }
 
-      // Get the blob from the response
-      const blob = await response.blob()
-
       // Create a download link
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download =
-        filename.replace(/\.[^/.]+$/, '') + '_' + selectedGenre + '.wav'
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
+      const url = window.URL.createObjectURL(response.data)
 
-      toast({
-        title: 'Conversion Successful',
-        description: 'Your audio file has been converted successfully.'
-      })
+      // Store conversion data in session storage
+      const conversionData = {
+        filename:
+          filename.replace(/\.[^/.]+$/, '') + '_' + selectedGenre + '.wav',
+        predictedGenre: metadata.predictedGenre || 'unknown',
+        targetGenre: selectedGenre,
+        downloadUrl: url
+      }
+      sessionStorage.setItem('conversionResult', JSON.stringify(conversionData))
 
-      // Navigate back to home
-      setLocation('/')
+      // Navigate to result page
+      setLocation('/conversion-result')
     } catch (error) {
-      console.log('Conversion error:', error)
+      console.error('Conversion error:', error)
+      const axiosError = error as AxiosError
+      const errorMessage =
+        //@ts-ignore
+        axiosError.response?.data?.error || 'Failed to convert audio file'
       toast({
         title: 'Conversion Failed',
-        description:
-          error instanceof Error
-            ? error.message
-            : 'Failed to convert audio file',
+        description: errorMessage,
         variant: 'destructive'
       })
     } finally {
@@ -116,6 +143,13 @@ export default function Transform () {
               <FileAudio className='text-primary mr-2 h-5 w-5' />
               <div>
                 <p className='font-medium'>{filename}</p>
+                {predictedGenre && (
+                  <div className='flex items-center mt-2 text-sm text-gray-600'>
+                    <span>Detected Genre: {predictedGenre}</span>
+                    <ArrowRight className='mx-2 h-4 w-4' />
+                    <span>Target Genre: {selectedGenre}</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -3,6 +3,8 @@ from flask import Blueprint, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 import uuid
 from python_backend.utils.audio_processor import AudioProcessor
+import base64
+import json
 
 # Create blueprint
 uploads_bp = Blueprint('uploads', __name__)
@@ -91,7 +93,13 @@ def convert_file():
         
         # Transform the file
         print("Starting audio transformation...")
-        success = audio_processor.transform_genre(input_path, output_path, target_genre)
+        try:
+            success, predicted_genre, _ = audio_processor.transform_genre(input_path, output_path, target_genre)
+        except Exception as transform_error:
+            print(f"Error during transformation: {str(transform_error)}")
+            import traceback
+            print(traceback.format_exc())
+            return jsonify({'error': f'Transformation error: {str(transform_error)}'}), 500
         
         if not success:
             print("Transformation failed")
@@ -104,13 +112,38 @@ def convert_file():
             print(f"Output file not found after transformation: {output_path}")
             return jsonify({'error': 'Transformed file not found'}), 500
         
-        # Send the transformed file
-        return send_file(
+        # Create response with metadata
+        response = send_file(
             output_path,
             as_attachment=True,
             download_name=output_filename,
             mimetype='audio/wav'
         )
+        
+        # Add CORS headers
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'x-conversion-metadata, X-Conversion-Metadata'  # Expose both cases
+        
+        # Add predicted genre to response headers
+        if predicted_genre:
+            metadata = {
+                'predictedGenre': predicted_genre
+            }
+            # Encode metadata to base64 to avoid newline issues
+            encoded_metadata = base64.b64encode(json.dumps(metadata).encode()).decode()
+            # Set header in both cases to ensure compatibility
+            response.headers['x-conversion-metadata'] = encoded_metadata
+            response.headers['X-Conversion-Metadata'] = encoded_metadata
+            print(f"Added metadata to response: {metadata}")
+            print(f"Response headers after adding metadata: {dict(response.headers)}")
+        else:
+            print("No predicted genre available to add to headers")
+
+        # Log all headers before sending
+        print("Final response headers:", dict(response.headers))
+        return response
         
     except Exception as e:
         print(f"Error during conversion: {str(e)}")
